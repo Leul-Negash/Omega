@@ -7,12 +7,12 @@ import openai
 from   lib_llm_ext import initLocalEmbedding, useLocalEmbedding
 from src.logger import get_logger
 from config import config_get_by_key
+from embedding_models import embedding_model
 
 logger = get_logger(__name__)
 
 # --- Constants -----------------------------------------------------------
 
-EMBEDDING_MODEL = "text-embedding-3-large"
 COLLECTION_NAME = "memories"
 TOP_K = 5
 MIN_CHUNK_CHARS = 100
@@ -140,8 +140,8 @@ def _chunk_markdown(text, filename):
 
 def cloud_embed_batch(texts):
     """Embed a list of texts via an OpenAI-compatible API. Returns list of float vectors."""
-    model = config_get_by_key("embeddingModel", EMBEDDING_MODEL)
     provider = str(config_get_by_key("embeddingprovider", "OpenAI"))
+    model = embedding_model(provider, config_get_by_key("embeddingModel", ""))
     proxy_url = config_get_by_key("GATEWAY_URL")
     if proxy_url:
         client = openai.OpenAI(base_url=f"{proxy_url.rstrip('/')}/{provider.lower()}/", api_key="unused")
@@ -150,6 +150,7 @@ def cloud_embed_batch(texts):
     try:
         resp = client.embeddings.create(model=model, input=texts)
     except Exception as e:
+        logger.error(f"Embedding request failed: provider={provider} model={model}: {e}")
         raise RuntimeError(f"Embedding request failed: {e}") from e
     return [item.embedding for item in resp.data]
 
