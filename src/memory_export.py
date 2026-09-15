@@ -45,16 +45,10 @@ def _cloud_embedder(provider, model):
 
 
 def _embedding_options():
-    provider = str(
-        os.environ.get("EMBEDDING_PROVIDER")
-        or config_get_by_key("embeddingprovider", "Local")
-    ).strip()
+    provider = str(config_get_by_key("embeddingprovider", "Local")).strip()
     if provider.casefold() == "local":
         return {}
-    model = embedding_model(
-        provider,
-        os.environ.get("EMBEDDING_MODEL") or config_get_by_key("embeddingModel", ""),
-    )
+    model = embedding_model(provider, config_get_by_key("embeddingModel", ""))
     return {
         "embed_batch": _cloud_embedder(provider, model),
         "embedding_profile": {

@@ -185,6 +185,11 @@ def test_memory_store_receives_explicit_omega_storage_configuration(
     chroma_path = tmp_path / "custom-chroma"
     monkeypatch.setattr(handler, "_resolve_memory_dir", lambda: memory_dir)
     monkeypatch.setattr(handler, "_resolve_chroma_path", lambda: chroma_path)
+    monkeypatch.setattr(
+        handler,
+        "config_get_by_key",
+        lambda key, default=None: "Local" if key == "embeddingprovider" else default,
+    )
 
     store = handler.create_memory_store()
 
@@ -230,12 +235,10 @@ def install_fake_import_kb(monkeypatch):
     return calls
 
 
-def configure(monkeypatch, handler, tmp_path, provider, env_model=None, config_model=""):
-    monkeypatch.setenv("EMBEDDING_PROVIDER", provider)
-    if env_model is None:
-        monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
-    else:
-        monkeypatch.setenv("EMBEDDING_MODEL", env_model)
+def configure(monkeypatch, handler, tmp_path, provider, config_model="",
+              env_provider="Local", env_model="env-only-model"):
+    monkeypatch.setenv("EMBEDDING_PROVIDER", env_provider)
+    monkeypatch.setenv("EMBEDDING_MODEL", env_model)
     settings = {"embeddingprovider": provider, "embeddingModel": config_model}
     monkeypatch.setattr(
         handler,
@@ -253,7 +256,7 @@ def test_asicloud_memory_store_embeds_with_asicloud_default_model(
 ):
     stores = install_fake_memory_store(monkeypatch, tmp_path)
     calls = install_fake_import_kb(monkeypatch)
-    configure(monkeypatch, handler, tmp_path, "ASICloud", env_model="")
+    configure(monkeypatch, handler, tmp_path, "ASICloud")
 
     handler.create_memory_store()
 
@@ -269,7 +272,7 @@ def test_asicloud_memory_store_embeds_with_asicloud_default_model(
     ]
 
 
-def test_memory_store_uses_the_model_passed_to_the_container(
+def test_memory_store_uses_the_configured_model(
     handler,
     monkeypatch,
     tmp_path,
@@ -277,7 +280,7 @@ def test_memory_store_uses_the_model_passed_to_the_container(
     stores = install_fake_memory_store(monkeypatch, tmp_path)
     calls = install_fake_import_kb(monkeypatch)
     configure(
-        monkeypatch, handler, tmp_path, "ASICloud", env_model="BAAI/bge-base-en-v1.5"
+        monkeypatch, handler, tmp_path, "ASICloud", config_model="BAAI/bge-base-en-v1.5"
     )
 
     handler.create_memory_store()
@@ -312,11 +315,44 @@ def test_memory_store_uses_the_runtime_model_inside_the_agent(
     assert stores[0]["embedding_profile"]["model"] == "text-embedding-3-small"
 
 
+def test_memory_store_ignores_embedding_environment_variables(
+    handler,
+    monkeypatch,
+    tmp_path,
+):
+    stores = install_fake_memory_store(monkeypatch, tmp_path)
+    install_fake_import_kb(monkeypatch)
+    configure(monkeypatch, handler, tmp_path, "Local", env_provider="ASICloud")
+
+    handler.create_memory_store()
+
+    assert stores == [
+        {
+            "memory_dir": tmp_path / "memory",
+            "chroma_path": tmp_path / "chroma",
+            "collection_name": "memories",
+        }
+    ]
+
+
+def test_entrypoint_passes_container_arguments_to_memory_portability():
+    entrypoint = (REPO_ROOT / "entrypoint.sh").read_text(encoding="utf-8")
+
+    assert "init_config(sys.argv[1:])" in entrypoint
+    assert "init_config([])" not in entrypoint
+    assert entrypoint.count(
+        """su nobody -s /bin/sh -c 'exec python3 -c "$MEMORY_PORTABILITY_PYTHON" "$@"' sh "$@\""""
+    ) == 2
+
+
 def test_export_is_allowed_for_asicloud_embeddings(handler, monkeypatch):
     created = []
     package = types.ModuleType("memory_portability")
     package.MemoryTransfer = lambda **kwargs: created.append(kwargs) or "transfer"
     monkeypatch.setitem(sys.modules, "memory_portability", package)
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "Local")
+    monkeypatch.setenv("OMEGA_VERSION", "unset")
+    monkeypatch.setattr(handler, "omega_version", lambda: "Omega version=test")
     monkeypatch.setattr(handler, "create_memory_store", lambda: "configured-store")
     monkeypatch.setattr(
         handler,
