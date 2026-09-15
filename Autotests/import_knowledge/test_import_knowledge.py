@@ -68,34 +68,6 @@ def test_openai_with_key_runs_import_and_writes_sentinel(env):
     assert (env["chroma"] / ".import-kb.openai.done").exists()
 
 
-def test_asicloud_with_key_runs_import_and_writes_sentinel(env):
-    env["env"]["EMBEDDING_PROVIDER"] = "ASICloud"
-    env["env"]["ASI_API_KEY"] = "dummy-key"
-    r = run(env["env"])
-    assert r.returncode == 0, r.stderr
-    assert env["marker"].read_text().strip() == "--provider asicloud"
-    assert (env["chroma"] / ".import-kb.asicloud.done").exists()
-
-
-def test_asicloud_without_key_exit1(env):
-    env["env"]["EMBEDDING_PROVIDER"] = "ASICloud"
-    r = run(env["env"])
-    assert r.returncode == 1
-    assert "ASI_API_KEY is required" in r.stderr
-    assert not env["marker"].exists()
-
-
-def test_embedding_model_is_passed_to_the_import(env):
-    env["env"]["EMBEDDING_PROVIDER"] = "ASICloud"
-    env["env"]["ASI_API_KEY"] = "dummy-key"
-    env["env"]["EMBEDDING_MODEL"] = "BAAI/bge-base-en-v1.5"
-    r = run(env["env"])
-    assert r.returncode == 0, r.stderr
-    assert env["marker"].read_text().strip() == (
-        "--provider asicloud --model BAAI/bge-base-en-v1.5"
-    )
-
-
 # OpenAI without a key stops at exit 1 and imports nothing.
 def test_openai_without_key_exit1(env):
     env["env"]["EMBEDDING_PROVIDER"] = "OpenAI"
@@ -195,3 +167,31 @@ def test_failed_import_does_not_write_sentinel(env):
     assert r.returncode != 0
     assert env["marker"].exists()
     assert not (env["chroma"] / ".import-kb.local.done").exists()
+
+
+def test_asicloud_with_key_runs_import_and_writes_sentinel(env):
+    env["env"]["EMBEDDING_PROVIDER"] = "ASICloud"
+    env["env"]["ASI_API_KEY"] = "dummy-key"
+    r = run(env["env"])
+    assert r.returncode == 0, r.stderr
+    assert env["marker"].read_text().strip() == "--provider asicloud"
+    assert (env["chroma"] / ".import-kb.asicloud.done").exists()
+
+
+def test_asicloud_without_key_exit1(env):
+    env["env"]["EMBEDDING_PROVIDER"] = "ASICloud"
+    r = run(env["env"])
+    assert r.returncode == 1
+    assert "ASI_API_KEY is required" in r.stderr
+    assert not env["marker"].exists()
+
+
+def test_embedding_model_is_passed_to_the_import(env):
+    env["env"]["EMBEDDING_PROVIDER"] = "ASICloud"
+    env["env"]["ASI_API_KEY"] = "dummy-key"
+    env["env"]["EMBEDDING_MODEL"] = "BAAI/bge-base-en-v1.5"
+    r = run(env["env"])
+    assert r.returncode == 0, r.stderr
+    assert env["marker"].read_text().strip() == (
+        "--provider asicloud --model BAAI/bge-base-en-v1.5"
+    )
