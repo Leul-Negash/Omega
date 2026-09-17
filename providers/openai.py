@@ -56,11 +56,14 @@ class OpenAIProviderImpl(llm.AIProvider):
             response = self._client.responses.create(**create_kwargs)
 
             raw = response.output_text or ""
+            incomplete_details = getattr(response, "incomplete_details", None)
+            incomplete_reason = getattr(incomplete_details, "reason", None)
             llm._log_raw(self._name, self._model_name, raw)
             llm._log_responses_completion(self._name, self._model_name, response)
             if not raw:
                 logger.warning("LLM returned an empty response")
-                raw = llm._llm_empty_response_command()
+                if incomplete_reason == "max_output_tokens":
+                    raw = llm._llm_empty_response_command()
             return self._clean_text(raw)
         except Exception as e:
             logger.exception(f"[OpenAIProviderImpl.chat]: Exception while communicating with LLM: {e}")

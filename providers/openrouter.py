@@ -8,24 +8,6 @@ from config import config_get_by_key
 
 logger = get_logger(__name__)
 
-# Share of the completion budget OpenRouter reserves for reasoning at each effort level.
-# Models that accept only reasoning.max_tokens get the same split, computed here.
-# See: https://openrouter.ai/docs/guides/best-practices/reasoning-tokens#reasoning-effort-level
-REASONING_EFFORT_RATIO = {
-    "none": 0.0,
-    "minimal": 0.10,
-    "low": 0.20,
-    "medium": 0.50,
-    "high": 0.80,
-    "xhigh": 0.95,
-    "max": 0.95,
-}
-
-def _reasoning_budget(max_tokens: int, effort: str) -> int:
-    """Tokens reserved for reasoning; the rest of max_tokens stays for the answer."""
-    ratio = REASONING_EFFORT_RATIO.get((effort or "none").lower(), 0.0)
-    return int(max_tokens * ratio)
-
 class OpenRouterProvider(providers.LLMProvider):
 
     def __init__(self):
@@ -64,19 +46,15 @@ class OpenRouterProviderImpl(llm.AIProvider):
 
         return None
 
-    def _openrouter_extra_body(self, content: str, max_tokens: int, reasoning: str) -> Dict[str, Any]:
+    def _openrouter_extra_body(self, content: str, reasoning: str) -> Dict[str, Any]:
         is_anthropic = self._model_name.lower().startswith("anthropic/")
         sysmsg, _ = llm._split_system_user(content)
-        # OpenRouter Anthropic models support `max_tokens` for reasoning,
-        # while other models expect an effort level.
-        reasoning_config = (
-            {"max_tokens": _reasoning_budget(max_tokens, reasoning)} if is_anthropic
-            else {"effort": reasoning}
-        )
+        # For models that accept only a reasoning token budget (e.g. Anthropic),
+        # OpenRouter derives it from the effort level and max_tokens itself.
         body = {
             "reasoning": {
-                "enabled": True,
-                **reasoning_config,
+                "enabled": True if reasoning and str(reasoning).lower() != "none" else False,
+                "effort": reasoning,
                 "exclude": True,
             }
         }
@@ -102,7 +80,7 @@ class OpenRouterProviderImpl(llm.AIProvider):
 
     def chat(self, content: str, max_tokens: int = 6000, reasoning: str = "medium", **kwargs) -> str:
         extra_body = llm._merge_dicts(
-            self._openrouter_extra_body(content, max_tokens, reasoning),
+            self._openrouter_extra_body(content, reasoning),
             kwargs.pop("extra_body", None),
         )
 

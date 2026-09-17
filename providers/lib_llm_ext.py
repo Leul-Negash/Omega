@@ -3,6 +3,7 @@ import openai
 from typing import Optional, Tuple, Dict, Any
 from config import config_get_by_key
 from src.helper import quote_arg
+from src.logger import get_logger
 
 PROMPT_DELIMITER = ":-:-:-:"
 LLM_EMPTY_RESPONSE_MESSAGE = (
@@ -19,8 +20,6 @@ LLM_EMPTY_RESPONSE_MESSAGE = (
     "reasoning and the final answer draw from the same token limit, so higher "
     "reasoning levels need a higher token limit."
 )
-
-from src.logger import get_logger
 
 
 logger = get_logger(__name__)
@@ -42,7 +41,7 @@ def _log_chat_completion(provider: str, model: str, response) -> None:
         f"completion_tokens={getattr(usage, 'completion_tokens', None)} "
         f"reasoning_tokens={getattr(details, 'reasoning_tokens', None)} "
     )
-    logger.debug(line)
+    logger.info(line)
 
 def _log_responses_completion(provider: str, model: str, response) -> None:
     """Report how the completion budget was actually spent (Responses API).
@@ -60,7 +59,7 @@ def _log_responses_completion(provider: str, model: str, response) -> None:
         f"output_tokens={getattr(usage, 'output_tokens', None)} "
         f"reasoning_tokens={getattr(output_details, 'reasoning_tokens', None)} "
     )
-    logger.debug(line)
+    logger.info(line)
 
 def _llm_empty_response_command() -> str:
     """Return an explanatory message as a MeTTa `send` command when the LLM
@@ -184,11 +183,13 @@ class AIProvider(AbstractAIProvider):
             )
 
             raw = response.choices[0].message.content or ""
+            finish_reason = getattr(response.choices[0], "finish_reason", None)
             _log_raw(self._name, self._model_name, raw)
             _log_chat_completion(self._name, self._model_name, response)
             if not raw:
                 logger.warning("LLM returned an empty response")
-                raw = _llm_empty_response_command()
+                if finish_reason == "length":
+                    raw = _llm_empty_response_command()
             resp = self._clean_text(raw)
             return resp
         except Exception as e:
