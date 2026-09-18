@@ -12,8 +12,7 @@ The Omega release process has two main phases:
 | **Phase** | **Stage**                   | **What happens**                                                | 
 | --------- | --------------------------- | --------------------------------------------------------------- |
 | **1**     | **PR development**          | Code is developed and tested before merging to `main`           |
-|           | **QA validation**           | QA builds and tests the PR code locally. When needed, a         |
-|           |                             | Docker image can also be built and published manually           |
+|           | **QA validation**           | QA builds and tests the PR code locally. When needed, a <br>Docker image can also be built and published manually           |
 |           | **Merge to `main`**         | The approved PR is merged into `main`                           |
 | **2**     | **GitHub Release**          | A version such as `v0.2.0` is created and published             |
 |           | **Release build**           | The release workflow builds the formal release Docker image     |
