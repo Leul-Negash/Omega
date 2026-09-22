@@ -42,3 +42,4 @@ unit/test_fileio_verified_deletes.py
 unit/test_helper_parsing.py
 unit/test_llm_budget.py
 unit/test_openclaw_unit.py
+import_knowledge/test_import_knowledge.py
