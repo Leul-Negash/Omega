@@ -6,46 +6,83 @@ the turn ended without a word to the user and the task looked abandoned (#321).
 The timeout now comes back as a `send` command carrying a status message, the
 same way a reply cut off by the token limit already does.
 
-No container, no network, no API key: the client is replaced by a stub that
-raises the error under test.
+No container, no network, no API key, and no provider SDK: `openai` and the
+configuration module are stubbed before the module under test is loaded, the
+same pattern as test_openclaw_unit.py.
 """
 import importlib.util
 import os
 import sys
+import types
 
-import httpx
-import openai
 import pytest
 
 _REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
-for path in (_REPO_ROOT, os.path.join(_REPO_ROOT, "src")):
-    if path not in sys.path:
-        sys.path.insert(0, path)
+_LIB_LLM_EXT_PATH = os.path.join(_REPO_ROOT, "providers", "lib_llm_ext.py")
+_HELPER_PATH = os.path.join(_REPO_ROOT, "src", "helper.py")
+
+# lib_llm_ext.py does `from src.helper import quote_arg` (repo-root package).
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 
-def _load(name, relative_path):
-    spec = importlib.util.spec_from_file_location(name, os.path.join(_REPO_ROOT, relative_path))
+class _StubAPITimeoutError(Exception):
+    """Stands in for openai.APITimeoutError: the client's own timeout."""
+
+
+def _install_stubs():
+    config_stub = types.ModuleType("config")
+    config_stub.config_get_by_key = lambda key, default=None: None
+    sys.modules["config"] = config_stub
+
+    openai_stub = types.ModuleType("openai")
+    openai_stub.APITimeoutError = _StubAPITimeoutError
+    openai_stub.OpenAI = object  # only referenced in a type annotation
+    sys.modules["openai"] = openai_stub
+
+
+def _load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
 
 @pytest.fixture(scope="module")
 def llm():
-    return _load("lib_llm_ext_under_test", os.path.join("providers", "lib_llm_ext.py"))
+    saved = {name: sys.modules.get(name) for name in ("config", "openai")}
+    _install_stubs()
+    try:
+        yield _load("lib_llm_ext_under_test", _LIB_LLM_EXT_PATH)
+    finally:
+        for name, module in saved.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
 
 
 @pytest.fixture(scope="module")
 def helper():
-    return _load("helper_under_test", os.path.join("src", "helper.py"))
+    return _load("helper_under_test", _HELPER_PATH)
+
+
+def _gateway_error(status):
+    error = Exception(f"{status} Gateway Time-out")
+    error.status_code = status
+    return error
 
 
 class _RaisingClient:
-    """Minimal stand-in for openai.OpenAI whose chat call always fails."""
+    """Stand-in for the OpenAI client whose chat call always fails."""
 
     def __init__(self, error):
-        completions = type("_Completions", (), {"create": lambda _self, **kwargs: (_ for _ in ()).throw(error)})()
-        self.chat = type("_Chat", (), {"completions": completions})()
+        def create(**kwargs):
+            raise error
+
+        completions = types.SimpleNamespace(create=create)
+        self.chat = types.SimpleNamespace(completions=completions)
 
 
 def _provider(llm, error):
@@ -54,28 +91,20 @@ def _provider(llm, error):
     return provider
 
 
-def _timeout_error():
-    return openai.APITimeoutError(request=httpx.Request("POST", "http://gateway/openaiapi/chat/completions"))
-
-
 # --- which failures count as a timeout ---------------------------------------
 
 def test_client_timeout_is_a_timeout(llm):
-    assert llm._is_timeout_error(_timeout_error())
+    assert llm._is_timeout_error(_StubAPITimeoutError("timed out"))
 
 
 @pytest.mark.parametrize("status", [408, 504, 524])
 def test_gateway_timeout_statuses_are_a_timeout(llm, status):
-    error = Exception("gateway timeout")
-    error.status_code = status
-    assert llm._is_timeout_error(error)
+    assert llm._is_timeout_error(_gateway_error(status))
 
 
 @pytest.mark.parametrize("status", [400, 429, 500, 502])
 def test_other_statuses_are_not_a_timeout(llm, status):
-    error = Exception("other failure")
-    error.status_code = status
-    assert not llm._is_timeout_error(error)
+    assert not llm._is_timeout_error(_gateway_error(status))
 
 
 def test_a_plain_error_is_not_a_timeout(llm):
@@ -84,19 +113,14 @@ def test_a_plain_error_is_not_a_timeout(llm):
 
 # --- what chat() returns ------------------------------------------------------
 
-def test_chat_tells_the_user_when_the_request_times_out(llm):
-    result = _provider(llm, _timeout_error()).chat("prompt")
+def test_chat_tells_the_user_when_the_client_times_out(llm):
+    result = _provider(llm, _StubAPITimeoutError("timed out")).chat("prompt")
     assert result == llm._llm_timeout_command()
     assert "timed out" in result
 
 
 def test_chat_tells_the_user_when_the_gateway_times_out(llm):
-    error = openai.InternalServerError(
-        "504 Gateway Time-out",
-        response=httpx.Response(504, request=httpx.Request("POST", "http://gateway/openaiapi/chat/completions")),
-        body=None,
-    )
-    assert _provider(llm, error).chat("prompt") == llm._llm_timeout_command()
+    assert _provider(llm, _gateway_error(504)).chat("prompt") == llm._llm_timeout_command()
 
 
 def test_chat_still_returns_nothing_for_other_failures(llm):
