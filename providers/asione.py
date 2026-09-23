@@ -81,4 +81,6 @@ class ASIOneProviderImpl(llm.AIProvider):
             return resp
         except Exception as e:
             logger.exception(f"[ASIOneProviderImpl.chat]: Exception while communicating with LLM: {e}")
+            if llm._is_timeout_error(e):
+                return llm._llm_timeout_command()
             return ""

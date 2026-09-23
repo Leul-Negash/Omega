@@ -21,6 +21,18 @@ LLM_EMPTY_RESPONSE_MESSAGE = (
     "reasoning levels need a higher token limit."
 )
 
+LLM_TIMEOUT_MESSAGE = (
+    "LLM request timed out. Please try again later."
+    "\n\n"
+    "If you are the Omega administrator: the provider did not answer within the "
+    "request timeout and the retries were exhausted. The failed request is in "
+    "the agent log; check the provider status and, if its answers are simply "
+    "slow, raise the timeout of its route in the proxy configuration."
+)
+
+# Statuses a gateway returns when the upstream did not answer in time.
+GATEWAY_TIMEOUT_STATUSES = (408, 504, 524)
+
 
 logger = get_logger(__name__)
 
@@ -66,6 +78,21 @@ def _llm_empty_response_command() -> str:
     spends the entire output token budget on reasoning and returns no content.
     """
     return f"(send {quote_arg(LLM_EMPTY_RESPONSE_MESSAGE)})"
+
+def _is_timeout_error(error: BaseException) -> bool:
+    """True when the request ran out of time rather than failing outright: the
+    client's own timeout, or a timeout status from the gateway in front of the
+    provider (the proxy answers 504 when the upstream is still thinking).
+    """
+    if isinstance(error, openai.APITimeoutError):
+        return True
+    return getattr(error, "status_code", None) in GATEWAY_TIMEOUT_STATUSES
+
+def _llm_timeout_command() -> str:
+    """Return a status message as a MeTTa `send` command when the request times
+    out, so the turn ends with the user told instead of in silence.
+    """
+    return f"(send {quote_arg(LLM_TIMEOUT_MESSAGE)})"
 
 def _split_system_user(content: str) -> Tuple[str, str]:
     """
@@ -194,6 +221,8 @@ class AIProvider(AbstractAIProvider):
             return resp
         except Exception as e:
             logger.exception(f"[AIProvider.chat]: Exception while communicating with LLM: {e}")
+            if _is_timeout_error(e):
+                return _llm_timeout_command()
             return ""
 
     def _clean_text(self, text: str) -> str:
