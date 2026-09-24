@@ -33,6 +33,12 @@ LLM_TIMEOUT_MESSAGE = (
 # Statuses a gateway returns when the upstream did not answer in time.
 GATEWAY_TIMEOUT_STATUSES = (408, 504, 524)
 
+# One attempt per chat request. The client's own retries would multiply the
+# request timeout before the user hears anything, and the loop asks again on its
+# next iteration anyway, so a timeout is reported as soon as the first request
+# reaches its limit.
+CHAT_MAX_RETRIES = 0
+
 
 logger = get_logger(__name__)
 
@@ -172,9 +178,11 @@ class AIProvider(AbstractAIProvider):
             return openai.OpenAI(
                     api_key="proxy",
                     base_url=base_url,
+                    max_retries=CHAT_MAX_RETRIES,
                     )
         if self._var_name in os.environ:
-            return openai.OpenAI(api_key=os.environ.get(self._var_name), base_url=self._base_url)
+            return openai.OpenAI(api_key=os.environ.get(self._var_name), base_url=self._base_url,
+                                 max_retries=CHAT_MAX_RETRIES)
 
         return None
 

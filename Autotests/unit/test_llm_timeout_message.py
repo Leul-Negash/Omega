@@ -134,3 +134,32 @@ def test_the_timeout_command_parses_into_one_send(llm, helper):
     assert parsed.startswith('((send "')
     assert parsed.endswith('"))')
     assert parsed.count("(send ") == 1
+
+
+# --- one attempt, so the timeout is reported when the first request gives up --
+
+def _client_kwargs(llm, monkeypatch, gateway):
+    captured = {}
+
+    def recorder(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(llm.openai, "OpenAI", recorder)
+    monkeypatch.setattr(
+        llm, "config_get_by_key",
+        lambda key, default=None: gateway if key == "GATEWAY_URL" else default,
+    )
+    if gateway is None:
+        monkeypatch.setenv("OPENAIAPI_API_KEY", "dummy")
+    provider = llm.AIProvider("OpenAIAPI", "OPENAIAPI_API_KEY", "test-model", "http://localhost/v1/")
+    assert provider._create_client() is not None
+    return captured
+
+
+def test_the_proxy_client_makes_one_attempt(llm, monkeypatch):
+    assert _client_kwargs(llm, monkeypatch, "http://localhost:8080")["max_retries"] == 0
+
+
+def test_the_direct_client_makes_one_attempt(llm, monkeypatch):
+    assert _client_kwargs(llm, monkeypatch, None)["max_retries"] == 0
