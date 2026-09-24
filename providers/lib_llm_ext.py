@@ -1,4 +1,4 @@
-import os, hashlib
+import os, hashlib, time
 import openai
 from typing import Optional, Tuple, Dict, Any
 from config import config_get_by_key
@@ -33,11 +33,21 @@ LLM_TIMEOUT_MESSAGE = (
 # Statuses a gateway returns when the upstream did not answer in time.
 GATEWAY_TIMEOUT_STATUSES = (408, 504, 524)
 
-# One attempt per chat request. The client's own retries would multiply the
-# request timeout before the user hears anything, and the loop asks again on its
-# next iteration anyway, so a timeout is reported as soon as the first request
-# reaches its limit.
+# One attempt per chat request inside the SDK. Its retry loop repeats a timed-out
+# request unconditionally, which would multiply the request timeout before the
+# user hears anything. Transient failures are retried by _retrying() below
+# instead, where a timeout can be excluded.
 CHAT_MAX_RETRIES = 0
+
+# Failures worth trying again right away: the statuses the SDK retries by
+# default, minus the timeout ones, plus a connection that never got an answer.
+TRANSIENT_STATUSES = (409, 429, 500, 502, 503)
+# First attempt plus two retries, and only while the whole call stays inside the
+# budget: a failure that already cost minutes is not "transient", and the user is
+# waiting for an answer.
+CHAT_ATTEMPTS = 3
+CHAT_RETRY_BUDGET_SECONDS = 60
+CHAT_RETRY_BACKOFF_SECONDS = 0.5
 
 
 logger = get_logger(__name__)
@@ -99,6 +109,39 @@ def _llm_timeout_command() -> str:
     out, so the turn ends with the user told instead of in silence.
     """
     return f"(send {quote_arg(LLM_TIMEOUT_MESSAGE)})"
+
+def _is_transient_error(error: BaseException) -> bool:
+    """True for a failure that another attempt may get past. A timeout is not
+    one of them: it already spent the request timeout, so retrying it only keeps
+    the user waiting.
+    """
+    if _is_timeout_error(error):
+        return False
+    if isinstance(error, openai.APIConnectionError):
+        return True
+    return getattr(error, "status_code", None) in TRANSIENT_STATUSES
+
+def _retrying(call, provider: str):
+    """Run call(), retrying only transient failures and only briefly.
+
+    The SDK's own retries are off (CHAT_MAX_RETRIES), so this is the single place
+    that decides what gets another attempt: transient failures do, a timeout does
+    not, and nothing is retried once the budget is spent.
+    """
+    started = time.monotonic()
+    for attempt in range(1, CHAT_ATTEMPTS + 1):
+        try:
+            return call()
+        except Exception as error:
+            spent = time.monotonic() - started
+            if (attempt == CHAT_ATTEMPTS
+                    or spent >= CHAT_RETRY_BUDGET_SECONDS
+                    or not _is_transient_error(error)):
+                raise
+            delay = CHAT_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1))
+            logger.warning(
+                f"[{provider}.chat]: transient failure, retrying in {delay:.1f}s: {error}")
+            time.sleep(delay)
 
 def _split_system_user(content: str) -> Tuple[str, str]:
     """
@@ -210,11 +253,14 @@ class AIProvider(AbstractAIProvider):
             raise RuntimeError(f"{self.name} not configured (set {self._var_name})")
 
         try:
-            response = self._client.chat.completions.create(
-                model=self._model_name,
-                messages=self._build_messages(content),
-                max_tokens=max_tokens,
-                **kwargs
+            response = _retrying(
+                lambda: self._client.chat.completions.create(
+                    model=self._model_name,
+                    messages=self._build_messages(content),
+                    max_tokens=max_tokens,
+                    **kwargs
+                ),
+                self._name,
             )
 
             raw = response.choices[0].message.content or ""

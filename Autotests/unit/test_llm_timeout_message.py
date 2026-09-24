@@ -30,6 +30,10 @@ class _StubAPITimeoutError(Exception):
     """Stands in for openai.APITimeoutError: the client's own timeout."""
 
 
+class _StubAPIConnectionError(Exception):
+    """Stands in for openai.APIConnectionError: the request never got an answer."""
+
+
 def _install_stubs():
     config_stub = types.ModuleType("config")
     config_stub.config_get_by_key = lambda key, default=None: None
@@ -37,6 +41,7 @@ def _install_stubs():
 
     openai_stub = types.ModuleType("openai")
     openai_stub.APITimeoutError = _StubAPITimeoutError
+    openai_stub.APIConnectionError = _StubAPIConnectionError
     openai_stub.OpenAI = object  # only referenced in a type annotation
     sys.modules["openai"] = openai_stub
 
@@ -163,3 +168,77 @@ def test_the_proxy_client_makes_one_attempt(llm, monkeypatch):
 
 def test_the_direct_client_makes_one_attempt(llm, monkeypatch):
     assert _client_kwargs(llm, monkeypatch, None)["max_retries"] == 0
+
+
+# --- which failures are worth another attempt --------------------------------
+
+@pytest.mark.parametrize("status", [409, 429, 500, 502, 503])
+def test_transient_statuses_are_retried(llm, status):
+    assert llm._is_transient_error(_gateway_error(status))
+
+
+@pytest.mark.parametrize("status", [408, 504, 524])
+def test_timeout_statuses_are_not_retried(llm, status):
+    assert not llm._is_transient_error(_gateway_error(status))
+
+
+def test_a_client_timeout_is_not_retried(llm):
+    assert not llm._is_transient_error(_StubAPITimeoutError("timed out"))
+
+
+def test_a_connection_error_is_retried(llm):
+    assert llm._is_transient_error(_StubAPIConnectionError("no answer"))
+
+
+def test_a_plain_error_is_not_retried(llm):
+    assert not llm._is_transient_error(ValueError("boom"))
+
+
+# --- how _retrying behaves ----------------------------------------------------
+
+def _counting_call(errors):
+    """Raise each error in turn, then return a sentinel. Records the attempts."""
+    calls = []
+
+    def call():
+        calls.append(len(calls) + 1)
+        if calls[-1] <= len(errors):
+            raise errors[calls[-1] - 1]
+        return "answer"
+
+    return call, calls
+
+
+def test_a_transient_failure_is_retried_until_it_succeeds(llm, monkeypatch):
+    monkeypatch.setattr(llm.time, "sleep", lambda seconds: None)
+    call, calls = _counting_call([_gateway_error(503)])
+    assert llm._retrying(call, "OpenAIAPI") == "answer"
+    assert len(calls) == 2
+
+
+def test_a_timeout_is_attempted_once(llm, monkeypatch):
+    monkeypatch.setattr(llm.time, "sleep", lambda seconds: None)
+    call, calls = _counting_call([_StubAPITimeoutError("timed out")] * 3)
+    with pytest.raises(_StubAPITimeoutError):
+        llm._retrying(call, "OpenAIAPI")
+    assert len(calls) == 1
+
+
+def test_transient_failures_stop_at_the_attempt_limit(llm, monkeypatch):
+    monkeypatch.setattr(llm.time, "sleep", lambda seconds: None)
+    call, calls = _counting_call([_gateway_error(503)] * 5)
+    with pytest.raises(Exception):
+        llm._retrying(call, "OpenAIAPI")
+    assert len(calls) == llm.CHAT_ATTEMPTS
+
+
+def test_a_slow_transient_failure_is_not_retried(llm, monkeypatch):
+    """A failure that already took longer than the budget is not transient in
+    any useful sense, so the caller hears about it instead of waiting again."""
+    monkeypatch.setattr(llm.time, "sleep", lambda seconds: None)
+    clock = iter([0, llm.CHAT_RETRY_BUDGET_SECONDS + 1])
+    monkeypatch.setattr(llm.time, "monotonic", lambda: next(clock))
+    call, calls = _counting_call([_gateway_error(503)] * 3)
+    with pytest.raises(Exception):
+        llm._retrying(call, "OpenAIAPI")
+    assert len(calls) == 1

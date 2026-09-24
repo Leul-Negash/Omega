@@ -53,7 +53,7 @@ class OpenAIProviderImpl(llm.AIProvider):
 
             create_kwargs.update(kwargs)
 
-            response = self._client.responses.create(**create_kwargs)
+            response = llm._retrying(lambda: self._client.responses.create(**create_kwargs), self._name)
 
             raw = response.output_text or ""
             incomplete_details = getattr(response, "incomplete_details", None)
