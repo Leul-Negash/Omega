@@ -118,14 +118,16 @@ def test_a_plain_error_is_not_a_timeout(llm):
 
 # --- what chat() returns ------------------------------------------------------
 
+def _is_timeout_notice(result):
+    return result.startswith('(send "LLM request timed out at ') and result.endswith('")')
+
+
 def test_chat_tells_the_user_when_the_client_times_out(llm):
-    result = _provider(llm, _StubAPITimeoutError("timed out")).chat("prompt")
-    assert result == llm._llm_timeout_command()
-    assert "timed out" in result
+    assert _is_timeout_notice(_provider(llm, _StubAPITimeoutError("timed out")).chat("prompt"))
 
 
 def test_chat_tells_the_user_when_the_gateway_times_out(llm):
-    assert _provider(llm, _gateway_error(504)).chat("prompt") == llm._llm_timeout_command()
+    assert _is_timeout_notice(_provider(llm, _gateway_error(504)).chat("prompt"))
 
 
 def test_chat_still_returns_nothing_for_other_failures(llm):
@@ -172,7 +174,7 @@ def test_the_direct_client_makes_one_attempt(llm, monkeypatch):
 
 # --- which failures are worth another attempt --------------------------------
 
-@pytest.mark.parametrize("status", [409, 429, 500, 502, 503])
+@pytest.mark.parametrize("status", [409, 429, 500, 502, 503, 522, 529])
 def test_transient_statuses_are_retried(llm, status):
     assert llm._is_transient_error(_gateway_error(status))
 
@@ -242,3 +244,55 @@ def test_a_slow_transient_failure_is_not_retried(llm, monkeypatch):
     with pytest.raises(Exception):
         llm._retrying(call, "OpenAIAPI")
     assert len(calls) == 1
+
+
+# --- the wait between attempts follows Retry-After ----------------------------
+
+def _retry_after_error(status, value):
+    error = _gateway_error(status)
+    error.response = types.SimpleNamespace(headers={"retry-after": value})
+    return error
+
+
+def test_retry_after_in_seconds_is_honoured(llm):
+    assert llm._retry_delay(_retry_after_error(429, "5"), 1) == 5.0
+
+
+def test_retry_after_as_a_date_falls_back_to_the_backoff(llm):
+    delay = llm._retry_delay(_retry_after_error(429, "Wed, 21 Oct 2026 07:28:00 GMT"), 1)
+    assert delay == llm.CHAT_RETRY_BACKOFF_SECONDS
+
+
+def test_without_retry_after_the_backoff_grows(llm):
+    assert llm._retry_delay(_gateway_error(503), 1) == llm.CHAT_RETRY_BACKOFF_SECONDS
+    assert llm._retry_delay(_gateway_error(503), 2) == llm.CHAT_RETRY_BACKOFF_SECONDS * 2
+
+
+def test_the_retry_waits_as_long_as_the_provider_asked(llm, monkeypatch):
+    slept = []
+    monkeypatch.setattr(llm.time, "sleep", slept.append)
+    call, calls = _counting_call([_retry_after_error(429, "5")])
+    assert llm._retrying(call, "OpenAIAPI") == "answer"
+    assert slept == [5.0]
+    assert len(calls) == 2
+
+
+def test_a_retry_after_beyond_the_budget_is_not_waited_out(llm, monkeypatch):
+    monkeypatch.setattr(llm.time, "sleep", lambda seconds: None)
+    call, calls = _counting_call([_retry_after_error(429, str(llm.CHAT_RETRY_BUDGET_SECONDS + 10))] * 3)
+    with pytest.raises(Exception):
+        llm._retrying(call, "OpenAIAPI")
+    assert len(calls) == 1
+
+
+# --- two timeouts in a row must both reach the user --------------------------
+
+def test_the_notice_carries_the_time_so_repeats_are_not_identical(llm, monkeypatch):
+    """`send` drops a message equal to the last one it sent, so two notices in a
+    row have to differ or the second turn goes unanswered."""
+    clock = iter(["05:14:17", "05:15:52"])
+    monkeypatch.setattr(llm.time, "strftime", lambda fmt: next(clock))
+    first = llm._llm_timeout_command()
+    second = llm._llm_timeout_command()
+    assert "05:14:17" in first and "05:15:52" in second
+    assert first != second
