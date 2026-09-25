@@ -100,12 +100,6 @@ def make_openrouter(create, model="z-ai/glm-5.2"):
     return provider
 
 
-def make_base(create, name="ASICloud"):
-    provider = llm.AIProvider(name, "ASI_API_KEY", "minimax/minimax-m3", "https://example.invalid/v1")
-    provider._client = NS(chat=NS(completions=NS(create=create)))
-    return provider
-
-
 def make_openai(create):
     provider = openai_provider.OpenAIProviderImpl("OpenAI", "OPENAI_API_KEY", "gpt-5.5", "https://api.openai.com/v1")
     provider._client = NS(responses=NS(create=create))
@@ -125,6 +119,10 @@ def sent_text(reply):
     return json.loads(reply[len("(send "):-1])
 
 
+def swallowed_errors(caplog):
+    return [r for r in caplog.records if r.exc_info]
+
+
 def test_normal_reply_is_returned_after_a_single_call():
     create = FakeCreate(chat_response('(send "hi")', "stop", completion_tokens=40, reasoning_tokens=30))
     assert make_openrouter(create).chat(PROMPT) == '(send "hi")'
@@ -136,9 +134,10 @@ def test_empty_reply_out_of_budget_is_explained():
     assert sent_text(make_openrouter(create).chat(PROMPT)) == llm.LLM_EMPTY_RESPONSE_MESSAGE
 
 
-def test_empty_reply_with_stop_is_not_blamed_on_the_budget():
+def test_empty_reply_with_stop_is_not_blamed_on_the_budget(caplog):
     create = FakeCreate(chat_response("", "stop", completion_tokens=0, reasoning_tokens=0))
     assert make_openrouter(create).chat(PROMPT) == ""
+    assert swallowed_errors(caplog) == []
 
 
 def test_openai_empty_reply_out_of_budget_is_explained():
@@ -146,9 +145,10 @@ def test_openai_empty_reply_out_of_budget_is_explained():
     assert sent_text(make_openai(create).chat(PROMPT, max_tokens=120)) == llm.LLM_EMPTY_RESPONSE_MESSAGE
 
 
-def test_openai_empty_reply_without_incomplete_reason_returns_empty():
+def test_openai_empty_reply_without_incomplete_reason_returns_empty(caplog):
     create = FakeCreate(responses_response("", "completed", output_tokens=0, reasoning_tokens=0))
     assert make_openai(create).chat(PROMPT) == ""
+    assert swallowed_errors(caplog) == []
 
 
 def test_asione_empty_reply_out_of_budget_is_explained():
